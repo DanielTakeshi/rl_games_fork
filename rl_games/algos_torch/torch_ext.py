@@ -41,7 +41,7 @@ def mean_mask(input, mask, sum_mask):
 def shape_whc_to_cwh(shape):
     if len(shape) == 3:
         return (shape[2], shape[0], shape[1])
-    
+
     return shape
 
 
@@ -136,7 +136,7 @@ def apply_masks(losses, mask=None):
         res_losses = [(l * mask).sum() / sum_mask for l in losses]
     else:
         res_losses = [torch.mean(l) for l in losses]
-    
+
     return res_losses, sum_mask
 
 def normalization_with_masks(values, masks):
@@ -187,7 +187,7 @@ def policy_clip_fraction(new_neglogp, old_neglogp, clip_param, masks=None):
     else:
         clip_frac = clip_frac.mean()
     return clip_frac
-    
+
 class CoordConv2d(nn.Conv2d):
     pool = {}
     def __init__(self, in_channels, out_channels, kernel_size, stride=1,
@@ -252,7 +252,7 @@ class DiscreteActionsEncoder(nn.Module):
             self.embedding = torch.nn.Embedding(actions_max, emb_size)
         else:
             self.emb_size = actions_max
-        
+
         self.linear = torch.nn.Linear(self.emb_size * num_agents, mlp_out)
 
     def forward(self, discrete_actions):
@@ -287,7 +287,7 @@ class CategoricalMaskedNaive(torch.distributions.Categorical):
             inf_mask = torch.log(masks.float())
             logits = logits + inf_mask
             super(CategoricalMasked, self).__init__(probs, logits, validate_args)
-    
+
     def entropy(self):
         if self.masks is None:
             return super(CategoricalMasked, self).entropy()
@@ -305,7 +305,7 @@ class CategoricalMasked(torch.distributions.Categorical):
             self.device = self.masks.device
             logits = torch.where(self.masks, logits, torch.tensor(-1e+8).to(self.device))
             super(CategoricalMasked, self).__init__(probs, logits, validate_args)
-    
+
     def rsample(self):
         u = torch.distributions.Uniform(low=torch.zeros_like(self.logits, device = self.logits.device), high=torch.ones_like(self.logits, device = self.logits.device)).sample()
         #print(u.size(), self.logits.size())
@@ -319,7 +319,9 @@ class CategoricalMasked(torch.distributions.Categorical):
         p_log_p = torch.where(self.masks, p_log_p, torch.tensor(0.0).to(self.device))
         return -p_log_p.sum(-1)
 
+
 class AverageMeter(nn.Module):
+
     def __init__(self, in_shape, max_size):
         super(AverageMeter, self).__init__()
         self.max_size = max_size
@@ -327,6 +329,20 @@ class AverageMeter(nn.Module):
         self.register_buffer("mean", torch.zeros(in_shape, dtype = torch.float32))
 
     def update(self, values):
+        """Updates `self.mean` using weighted sum of old and new values (for wandb).
+
+        Only applies if there are any values, so if we use to report sum of rewards
+        at the end of episodes, then this might be called more times with no values
+        due to a short horizon length (e.g., 16 in PPO, vs episode lengths of 500),
+        especially if no early termination (thus, this only gets called at regular
+        intervals). In this case, we only consider current values, i.e., old_size=0
+        and size=100, and once we finish the first episodes in all the parallel envs,
+        self.current_size=100.
+
+        Also called to record the # of time steps per episode to wandb.
+
+        With early termination, it might get more complex but we're not doing that.
+        """
         size = values.size()[0]
         if size == 0:
             return
@@ -356,5 +372,3 @@ class IdentityRNN(nn.Module):
 
     def forward(self, x, h):
         return self.identity(x), h
-
- 
