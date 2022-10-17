@@ -61,6 +61,11 @@ class A2CBase(BaseAlgorithm):
         else:
             self.experiment_name = config['name'] + pbt_str + datetime.now().strftime("_%d-%H-%M-%S")
 
+        # NOTE(daniel): any special circumstances or extra statistics to track.
+        # TODO(daniel): make more general, e.g., it's only for ContinuousA2CBase now.
+        self.extra_wandb_stats = config['name'] == 'UR5Trees'
+
+        # NOTE(daniel): back to normal...
         self.config = config
         self.algo_observer = config['features']['observer']
         self.algo_observer.before_init(base_name, config, self.experiment_name)
@@ -181,6 +186,8 @@ class A2CBase(BaseAlgorithm):
         print('current training device:', self.ppo_device)
         self.game_rewards = torch_ext.AverageMeter(self.value_size, self.games_to_track).to(self.ppo_device)
         self.game_lengths = torch_ext.AverageMeter(1, self.games_to_track).to(self.ppo_device)
+        if self.extra_wandb_stats:
+            self.game_dists = torch_ext.AverageMeter(1, self.games_to_track).to(self.ppo_device)
         self.obs = None
         self.games_num = self.config['minibatch_size'] // self.seq_len # it is used only for current rnn implementation
         self.batch_size = self.horizon_length * self.num_actors * self.num_agents
@@ -405,6 +412,11 @@ class A2CBase(BaseAlgorithm):
         self.current_lengths = torch.zeros(batch_size, dtype=torch.float32, device=self.ppo_device)
         self.dones = torch.ones((batch_size,), dtype=torch.uint8, device=self.ppo_device)
 
+        # TODO(daniel): this needs to be env-dependent or set in a more flexible manner,
+        # since we assume we are going to be saving this particular statistic, etc.
+        if self.extra_wandb_stats:
+            self.current_dists = torch.zeros(batch_size, dtype=torch.float32, device=self.ppo_device)
+
         if self.is_rnn:
             self.rnn_states = self.model.get_default_rnn_state()
             self.rnn_states = [s.to(self.ppo_device) for s in self.rnn_states]
@@ -509,6 +521,8 @@ class A2CBase(BaseAlgorithm):
         batch_size = self.num_agents * self.num_actors
         self.game_rewards.clear()
         self.game_lengths.clear()
+        if self.extra_wandb_stats:
+            self.game_dists.clear()
         self.mean_rewards = self.last_mean_rewards = -100500
         self.algo_observer.after_clear_stats()
 
@@ -647,21 +661,32 @@ class A2CBase(BaseAlgorithm):
 
             self.experience_buffer.update_data('rewards', n, shaped_rewards)
 
-            # Reports cumulative sum of rewards (as expected).
+            # Reports cumulative sum of rewards (as expected) and other statistics.
             self.current_rewards += rewards
             self.current_lengths += 1
+            if self.extra_wandb_stats:
+                # NOTE(daniel): for this, I think we just want the distance at the last time step.
+                # Once again we need to figure out a nice way to set this in the code ...
+                self.current_dists[:] = infos['stat_dist_to_targ']
+
+            # Handle `done` indices. To make it simple, don't use early termination.
             all_done_indices = self.dones.nonzero(as_tuple=False)
             env_done_indices = self.dones.view(self.num_actors, self.num_agents).all(dim=1).nonzero(as_tuple=False)
 
             # Update data structures storing statistics only if episodes are finished.
             self.game_rewards.update(self.current_rewards[env_done_indices])
             self.game_lengths.update(self.current_lengths[env_done_indices])
+            if self.extra_wandb_stats:
+                self.game_dists.update(self.current_dists[env_done_indices])
+
             self.algo_observer.process_infos(infos, env_done_indices)
 
             # Reset data to 0 for any done episodes.
             not_dones = 1.0 - self.dones.float()
             self.current_rewards = self.current_rewards * not_dones.unsqueeze(1)
             self.current_lengths = self.current_lengths * not_dones
+            if self.extra_wandb_stats:
+                self.current_dists = self.current_dists * not_dones
 
         last_values = self.get_values(self.obs)
 
@@ -1206,6 +1231,8 @@ class ContinuousA2CBase(A2CBase):
                 if self.game_rewards.current_size > 0:
                     mean_rewards = self.game_rewards.get_mean()
                     mean_lengths = self.game_lengths.get_mean()
+                    if self.extra_wandb_stats:
+                        mean_dists = self.game_dists.get_mean()
                     self.mean_rewards = mean_rewards[0]
 
                     for i in range(self.value_size):
@@ -1217,6 +1244,12 @@ class ContinuousA2CBase(A2CBase):
                     self.writer.add_scalar('episode_lengths/step', mean_lengths, frame)
                     self.writer.add_scalar('episode_lengths/iter', mean_lengths, epoch_num)
                     self.writer.add_scalar('episode_lengths/time', mean_lengths, total_time)
+
+                    # TODO(daniel): later, change this to be like rewards, for different multiple stats.
+                    if self.extra_wandb_stats:
+                        self.writer.add_scalar('stat_final_dists/step', mean_dists, frame)
+                        self.writer.add_scalar('stat_final_dists/iter', mean_dists, epoch_num)
+                        self.writer.add_scalar('stat_final_dists/time', mean_dists, total_time)
 
                     if self.has_self_play_config:
                         self.self_play_manager.update(self)
